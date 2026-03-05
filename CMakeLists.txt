@@ -1,0 +1,35 @@
+build_lib(
+  LIBNAME cf-mimo
+  SOURCE_FILES
+    model/cf-mimo-messages.cc
+    model/cf-mimo-spectrum-signal-parameters.cc
+    model/cf-control-plane-helper.cc
+    model/cf-phy-mac-helper.cc
+    model/cf-ue-mac.cc
+    model/cf-ue-traffic-adapter.cc
+    model/cf-ap-mac.cc
+    model/cf-cpu-controller.cc
+    model/cf-ap-phy.cc
+    model/cf-ue-phy.cc
+  HEADER_FILES
+    model/cf-mimo-common.h
+    model/cf-mimo-messages.h
+    model/cf-mimo-spectrum-signal-parameters.h
+    model/cf-control-plane-helper.h
+    model/cf-phy-mac-helper.h
+    model/cf-ue-mac.h
+    model/cf-ue-traffic-adapter.h
+    model/cf-ap-mac.h
+    model/cf-cpu-controller.h
+    model/cf-ap-phy.h
+    model/cf-ue-phy.h
+  LIBRARIES_TO_LINK ${libcore}
+                    ${libspectrum}
+                    ${libpropagation}
+                    ${libmobility}
+                    ${libantenna}
+                    ${libnetwork}
+  TEST_SOURCES
+    test/cf-mimo-protocol-test-suite.cc
+    test/cf-mimo-pilot-phy-test-suite.cc
+)
