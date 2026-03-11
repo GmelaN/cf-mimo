@@ -212,6 +212,12 @@ main(int argc, char* argv[])
                 ue->ReceiveAssocOffer(offer);
             }
         });
+        ap->SetAssocAckSink([ue](const AssocAck& ack, UE_ID ueId) {
+            if (ueId == ue->GetUeId())
+            {
+                ue->ReceiveAssocAck(ack);
+            }
+        });
         CfPhyMacHelper::BindApGrantPath(ap, apPhyById[apId], ue, uePhy);
         ap->SetNeighborCoordSink([](const NeighborCoord&, AP_ID) {});
         ap->Start();

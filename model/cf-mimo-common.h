@@ -42,6 +42,16 @@ enum class CfRoleFlag : uint8_t
     SECONDARY = 2
 };
 
+enum class CfRejectReason : uint8_t
+{
+    NONE = 0,
+    MODE_MISMATCH = 1,
+    EPOCH_MISMATCH = 2,
+    NOT_IN_CLUSTER = 3,
+    OVERLOAD = 4,
+    TIMEOUT = 5
+};
+
 enum class UeMacState : uint8_t
 {
     UE_TRACK = 0,

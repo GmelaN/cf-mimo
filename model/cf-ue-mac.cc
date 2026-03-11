@@ -84,6 +84,13 @@ CfUeMac::SetOfferWindow(Time offerWindow)
 }
 
 void
+CfUeMac::SetAssocAckDeadline(Time ackDeadline)
+{
+    NS_LOG_FUNCTION(this << ackDeadline.GetNanoSeconds());
+    m_assocAckDeadline = ackDeadline;
+}
+
+void
 CfUeMac::SetTopNAp(uint8_t topNAp)
 {
     NS_LOG_FUNCTION(this << static_cast<uint32_t>(topNAp));
@@ -144,6 +151,13 @@ CfUeMac::SetAssocConfirmSink(AssocConfirmSink cb)
 {
     NS_LOG_FUNCTION(this);
     m_assocConfirmSink = std::move(cb);
+}
+
+void
+CfUeMac::SetDistributedClusterPolicy(DistributedClusterPolicy policy)
+{
+    NS_LOG_FUNCTION(this);
+    m_distributedClusterPolicy = std::move(policy);
 }
 
 void
@@ -211,6 +225,7 @@ CfUeMac::CancelEvents()
     m_stateReportEvent.Cancel();
     m_assocEvent.Cancel();
     m_assocDecisionEvent.Cancel();
+    m_assocAckDeadlineEvent.Cancel();
     m_ttiEvent.Cancel();
 }
 
@@ -243,6 +258,10 @@ CfUeMac::OnAssocTimer()
 
     if (m_mode == CfMode::DISTRIBUTED)
     {
+        if (m_assocAttempt.active)
+        {
+            RollbackAssocAttempt(static_cast<uint8_t>(CfRejectReason::TIMEOUT));
+        }
         m_state = UeMacState::UE_ASSOC_WAIT;
         m_offerEpoch = GetCurrentEpoch();
         m_offerBuffer.clear();
@@ -270,6 +289,21 @@ CfUeMac::OnAssocDecisionTimer(uint32_t assocEpoch)
     }
     DecideDistributedCluster(assocEpoch);
     m_state = UeMacState::UE_ASSOC_ACTIVE;
+}
+
+void
+CfUeMac::OnAssocAckDeadline(uint32_t assocEpoch, uint32_t clusterVer)
+{
+    NS_LOG_FUNCTION(this << assocEpoch << clusterVer);
+    if (!m_assocAttempt.active)
+    {
+        return;
+    }
+    if (m_assocAttempt.assocEpoch != assocEpoch || m_assocAttempt.clusterVer != clusterVer)
+    {
+        return;
+    }
+    RollbackAssocAttempt(static_cast<uint8_t>(CfRejectReason::TIMEOUT));
 }
 
 void
@@ -370,61 +404,69 @@ CfUeMac::DecideDistributedCluster(uint32_t assocEpoch)
     }
 
     AP_ID primaryAp = INVALID_AP_ID;
-    double bestPrimaryMetric = -1e18;
-    for (const auto& offer : offers)
-    {
-        const double metric = static_cast<double>(offer.score_q) -
-                              m_lambda * static_cast<double>(offer.load_q);
-        if (metric > bestPrimaryMetric)
-        {
-            bestPrimaryMetric = metric;
-            primaryAp = offer.ap_id;
-        }
-    }
-
     std::vector<AP_ID> members;
     members.reserve(m_maxClusterSize);
-    if (primaryAp != INVALID_AP_ID)
+    const auto sortedMeasurements = GetSortedMeasurements();
+    if (m_distributedClusterPolicy)
     {
-        members.push_back(primaryAp);
+        members = m_distributedClusterPolicy(
+            offers, sortedMeasurements, primaryAp, m_maxClusterSize, m_lambda, m_loadRejectThresholdQ);
     }
-
-    std::sort(offers.begin(), offers.end(), [](const AssocOffer& lhs, const AssocOffer& rhs) {
-        return lhs.score_q > rhs.score_q;
-    });
-
-    for (const auto& offer : offers)
+    else
     {
-        if (members.size() >= m_maxClusterSize)
+        double bestPrimaryMetric = -1e18;
+        for (const auto& offer : offers)
         {
-            break;
+            const double metric = static_cast<double>(offer.score_q) -
+                                  m_lambda * static_cast<double>(offer.load_q);
+            if (metric > bestPrimaryMetric)
+            {
+                bestPrimaryMetric = metric;
+                primaryAp = offer.ap_id;
+            }
         }
-        if (offer.ap_id == primaryAp || offer.load_q > m_loadRejectThresholdQ)
-        {
-            continue;
-        }
-        if (std::find(members.begin(), members.end(), offer.ap_id) != members.end())
-        {
-            continue;
-        }
-        members.push_back(offer.ap_id);
-    }
 
-    if (members.size() < m_maxClusterSize)
-    {
-        const auto sortedMeasurements = GetSortedMeasurements();
-        for (const auto& meas : sortedMeasurements)
+        if (primaryAp != INVALID_AP_ID)
+        {
+            members.push_back(primaryAp);
+        }
+
+        std::sort(offers.begin(), offers.end(), [](const AssocOffer& lhs, const AssocOffer& rhs) {
+            return lhs.score_q > rhs.score_q;
+        });
+
+        for (const auto& offer : offers)
         {
             if (members.size() >= m_maxClusterSize)
             {
                 break;
             }
-            if (meas.ap_id == INVALID_AP_ID ||
-                std::find(members.begin(), members.end(), meas.ap_id) != members.end())
+            if (offer.ap_id == primaryAp || offer.load_q > m_loadRejectThresholdQ)
             {
                 continue;
             }
-            members.push_back(meas.ap_id);
+            if (std::find(members.begin(), members.end(), offer.ap_id) != members.end())
+            {
+                continue;
+            }
+            members.push_back(offer.ap_id);
+        }
+
+        if (members.size() < m_maxClusterSize)
+        {
+            for (const auto& meas : sortedMeasurements)
+            {
+                if (members.size() >= m_maxClusterSize)
+                {
+                    break;
+                }
+                if (meas.ap_id == INVALID_AP_ID ||
+                    std::find(members.begin(), members.end(), meas.ap_id) != members.end())
+                {
+                    continue;
+                }
+                members.push_back(meas.ap_id);
+            }
         }
     }
 
@@ -433,28 +475,40 @@ CfUeMac::DecideDistributedCluster(uint32_t assocEpoch)
         NS_LOG_WARN("UE " << m_ueId << " did not find cluster candidates in epoch " << assocEpoch);
         return;
     }
+    if (primaryAp == INVALID_AP_ID)
+    {
+        primaryAp = members.front();
+    }
 
     AssocConfirm confirm{};
     confirm.ue_id = m_ueId;
     confirm.assoc_epoch = assocEpoch;
     confirm.cluster_ver = m_nextClusterVer++;
-    confirm.primary_ap = members.front();
+    confirm.primary_ap = primaryAp;
     confirm.cluster_size = static_cast<uint8_t>(members.size());
     for (size_t i = 0; i < members.size(); ++i)
     {
         confirm.cluster_members[i] = members[i];
     }
 
-    m_pendingCluster.valid = true;
-    m_pendingCluster.validFromEpoch = assocEpoch + 1;
-    m_pendingCluster.clusterVer = confirm.cluster_ver;
-    m_pendingCluster.primaryAp = confirm.primary_ap;
-    m_pendingCluster.clusterSize = confirm.cluster_size;
-    m_pendingCluster.members = confirm.cluster_members;
+    m_assocAttempt.active = true;
+    m_assocAttempt.assocEpoch = assocEpoch;
+    m_assocAttempt.clusterVer = confirm.cluster_ver;
+    m_assocAttempt.primaryAp = confirm.primary_ap;
+    m_assocAttempt.clusterSize = confirm.cluster_size;
+    m_assocAttempt.members = confirm.cluster_members;
+    m_assocAttempt.ackByAp.clear();
+    for (uint8_t i = 0; i < confirm.cluster_size; ++i)
+    {
+        m_assocAttempt.ackByAp[confirm.cluster_members[i]] = false;
+    }
+    m_assocAckDeadlineEvent.Cancel();
+    m_assocAckDeadlineEvent = Simulator::Schedule(
+        m_assocAckDeadline, &CfUeMac::OnAssocAckDeadline, this, assocEpoch, confirm.cluster_ver);
     NS_LOG_DEBUG("UE " << m_ueId << " selected cluster ver=" << confirm.cluster_ver
                        << " primary=" << confirm.primary_ap
                        << " size=" << static_cast<uint32_t>(confirm.cluster_size)
-                       << " applyEpoch=" << m_pendingCluster.validFromEpoch);
+                       << " waitingAckUntilMs=" << m_assocAckDeadline.GetMilliSeconds());
 
     if (!m_assocConfirmSink)
     {
@@ -465,6 +519,20 @@ CfUeMac::DecideDistributedCluster(uint32_t assocEpoch)
     {
         m_assocConfirmSink(confirm, confirm.cluster_members[i]);
     }
+}
+
+void
+CfUeMac::RollbackAssocAttempt(uint8_t reasonCode)
+{
+    NS_LOG_FUNCTION(this << static_cast<uint32_t>(reasonCode));
+    if (!m_assocAttempt.active)
+    {
+        return;
+    }
+    m_assocAckDeadlineEvent.Cancel();
+    m_assocAttempt = AssocAttempt{};
+    NS_LOG_DEBUG("UE " << m_ueId << " rollback pending association reason="
+                       << static_cast<uint32_t>(reasonCode));
 }
 
 void
@@ -609,6 +677,51 @@ CfUeMac::ReceiveAssocOffer(const AssocOffer& offer)
 }
 
 void
+CfUeMac::ReceiveAssocAck(const AssocAck& ack)
+{
+    NS_LOG_FUNCTION(this << ack.ue_id << ack.ap_id << ack.assoc_epoch << ack.cluster_ver
+                         << static_cast<uint32_t>(ack.ok));
+    if (ack.ue_id != m_ueId || !m_assocAttempt.active)
+    {
+        return;
+    }
+    if (ack.assoc_epoch != m_assocAttempt.assocEpoch || ack.cluster_ver != m_assocAttempt.clusterVer)
+    {
+        return;
+    }
+    const auto it = m_assocAttempt.ackByAp.find(ack.ap_id);
+    if (it == m_assocAttempt.ackByAp.end())
+    {
+        return;
+    }
+    if (ack.ok == 0)
+    {
+        RollbackAssocAttempt(ack.reason_code);
+        return;
+    }
+
+    it->second = true;
+    const bool allAcked = std::all_of(m_assocAttempt.ackByAp.begin(),
+                                      m_assocAttempt.ackByAp.end(),
+                                      [](const auto& item) { return item.second; });
+    if (!allAcked)
+    {
+        return;
+    }
+
+    m_assocAckDeadlineEvent.Cancel();
+    m_pendingCluster.valid = true;
+    m_pendingCluster.validFromEpoch = m_assocAttempt.assocEpoch + 1;
+    m_pendingCluster.clusterVer = m_assocAttempt.clusterVer;
+    m_pendingCluster.primaryAp = m_assocAttempt.primaryAp;
+    m_pendingCluster.clusterSize = m_assocAttempt.clusterSize;
+    m_pendingCluster.members = m_assocAttempt.members;
+    m_assocAttempt = AssocAttempt{};
+    NS_LOG_DEBUG("UE " << m_ueId << " all association ACK received, pending applyEpoch="
+                       << m_pendingCluster.validFromEpoch);
+}
+
+void
 CfUeMac::ReceiveSchedulingGrant(const SchedulingGrant& grant)
 {
     NS_LOG_FUNCTION(this << grant.ue_id << grant.tti);
@@ -633,6 +746,8 @@ CfUeMac::ReceiveCentralizedAssoc(const AssocConfirm& confirm)
         return;
     }
 
+    m_assocAckDeadlineEvent.Cancel();
+    m_assocAttempt = AssocAttempt{};
     m_pendingCluster.valid = true;
     m_pendingCluster.validFromEpoch = confirm.assoc_epoch + 1;
     m_pendingCluster.clusterVer = confirm.cluster_ver;

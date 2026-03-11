@@ -73,6 +73,7 @@ struct APSummary
     AP_ID ap_id{INVALID_AP_ID};
     uint32_t assoc_epoch{0};
     uint16_t load_q{0};
+    uint16_t fh_cap_q{0};
     uint16_t interf_q{0};
     uint8_t cand_ue_cnt{0};
     uint8_t reserved{0};
@@ -89,6 +90,27 @@ struct ClusterDecision
     uint8_t reserved{0};
     std::array<UE_ID, CfMimoConstants::MAX_UE_PER_AP_SCHED> assigned_ue_list{MakeInvalidAssignedUes()};
     std::array<uint8_t, CfMimoConstants::MAX_UE_PER_AP_SCHED> role_flags{};
+};
+
+struct AssocAck
+{
+    AP_ID ap_id{INVALID_AP_ID};
+    UE_ID ue_id{INVALID_UE_ID};
+    uint32_t assoc_epoch{0};
+    uint32_t cluster_ver{0};
+    uint8_t ok{0};
+    uint8_t reason_code{static_cast<uint8_t>(CfRejectReason::NONE)};
+    uint16_t reserved{0};
+};
+
+struct ClusterDecisionAck
+{
+    AP_ID ap_id{INVALID_AP_ID};
+    uint32_t assoc_epoch{0};
+    uint32_t cluster_ver{0};
+    uint8_t ok{0};
+    uint8_t reason_code{static_cast<uint8_t>(CfRejectReason::NONE)};
+    uint16_t reserved{0};
 };
 
 struct SchedulingGrant

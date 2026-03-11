@@ -111,6 +111,13 @@ CfApMac::SetLoadLimit(uint16_t loadMaxQ)
 }
 
 void
+CfApMac::SetFronthaulCap(uint16_t fhCapQ)
+{
+    NS_LOG_FUNCTION(this << fhCapQ);
+    m_fhCapQ = fhCapQ;
+}
+
+void
 CfApMac::SetMaxUePerSched(uint8_t maxUePerSched)
 {
     NS_LOG_FUNCTION(this << static_cast<uint32_t>(maxUePerSched));
@@ -122,6 +129,13 @@ CfApMac::SetOfferSink(OfferSink cb)
 {
     NS_LOG_FUNCTION(this);
     m_offerSink = std::move(cb);
+}
+
+void
+CfApMac::SetAssocAckSink(AssocAckSink cb)
+{
+    NS_LOG_FUNCTION(this);
+    m_assocAckSink = std::move(cb);
 }
 
 void
@@ -143,6 +157,13 @@ CfApMac::SetApSummarySink(ApSummarySink cb)
 {
     NS_LOG_FUNCTION(this);
     m_apSummarySink = std::move(cb);
+}
+
+void
+CfApMac::SetClusterDecisionAckSink(ClusterDecisionAckSink cb)
+{
+    NS_LOG_FUNCTION(this);
+    m_clusterDecisionAckSink = std::move(cb);
 }
 
 void
@@ -436,6 +457,7 @@ CfApMac::BuildAndSendApSummary(uint32_t assocEpoch)
     summary.ap_id = m_apId;
     summary.assoc_epoch = assocEpoch;
     summary.load_q = m_loadQ;
+    summary.fh_cap_q = m_fhCapQ;
     summary.interf_q = m_interfQ;
 
     const uint8_t count =
@@ -607,19 +629,55 @@ void
 CfApMac::ReceiveAssocConfirm(const AssocConfirm& confirm)
 {
     NS_LOG_FUNCTION(this << confirm.ue_id << confirm.assoc_epoch << confirm.cluster_ver);
-    if (m_mode != CfMode::DISTRIBUTED || confirm.assoc_epoch != GetCurrentEpoch())
+    AssocAck ack{};
+    ack.ap_id = m_apId;
+    ack.ue_id = confirm.ue_id;
+    ack.assoc_epoch = confirm.assoc_epoch;
+    ack.cluster_ver = confirm.cluster_ver;
+    ack.ok = 0;
+
+    if (m_mode != CfMode::DISTRIBUTED)
     {
-        NS_LOG_WARN("AP " << m_apId << " ignored AssocConfirm ue=" << confirm.ue_id
-                          << " epoch=" << confirm.assoc_epoch
-                          << " nowEpoch=" << GetCurrentEpoch()
-                          << " mode=" << static_cast<uint32_t>(m_mode));
+        ack.reason_code = static_cast<uint8_t>(CfRejectReason::MODE_MISMATCH);
+        if (m_assocAckSink)
+        {
+            m_assocAckSink(ack, confirm.ue_id);
+        }
+        return;
+    }
+    if (confirm.assoc_epoch != GetCurrentEpoch())
+    {
+        ack.reason_code = static_cast<uint8_t>(CfRejectReason::EPOCH_MISMATCH);
+        if (m_assocAckSink)
+        {
+            m_assocAckSink(ack, confirm.ue_id);
+        }
+        return;
+    }
+    if (!HasClusterMember(confirm, m_apId))
+    {
+        ack.reason_code = static_cast<uint8_t>(CfRejectReason::NOT_IN_CLUSTER);
+        if (m_assocAckSink)
+        {
+            m_assocAckSink(ack, confirm.ue_id);
+        }
+        return;
+    }
+    UpdateLoadAndInterference();
+    if (m_loadQ >= m_loadMaxQ)
+    {
+        ack.reason_code = static_cast<uint8_t>(CfRejectReason::OVERLOAD);
+        if (m_assocAckSink)
+        {
+            m_assocAckSink(ack, confirm.ue_id);
+        }
         return;
     }
 
     Assignment pending{};
     pending.validFromEpoch = confirm.assoc_epoch + 1;
     pending.clusterVer = confirm.cluster_ver;
-    pending.served = HasClusterMember(confirm, m_apId);
+    pending.served = true;
     if (pending.served)
     {
         pending.role =
@@ -630,19 +688,50 @@ CfApMac::ReceiveAssocConfirm(const AssocConfirm& confirm)
                        << " served=" << pending.served
                        << " role=" << static_cast<uint32_t>(pending.role)
                        << " applyEpoch=" << pending.validFromEpoch);
+    ack.ok = 1;
+    ack.reason_code = static_cast<uint8_t>(CfRejectReason::NONE);
+    if (m_assocAckSink)
+    {
+        m_assocAckSink(ack, confirm.ue_id);
+    }
 }
 
 void
 CfApMac::ReceiveClusterDecision(const ClusterDecision& decision)
 {
     NS_LOG_FUNCTION(this << decision.ap_id << decision.assoc_epoch << decision.cluster_ver);
-    if (m_mode != CfMode::CENTRALIZED || decision.ap_id != m_apId ||
-        decision.assoc_epoch != GetCurrentEpoch())
+    ClusterDecisionAck ack{};
+    ack.ap_id = m_apId;
+    ack.assoc_epoch = decision.assoc_epoch;
+    ack.cluster_ver = decision.cluster_ver;
+    ack.ok = 0;
+
+    if (m_mode != CfMode::CENTRALIZED || decision.ap_id != m_apId)
     {
-        NS_LOG_WARN("AP " << m_apId << " ignored ClusterDecision for ap=" << decision.ap_id
-                          << " epoch=" << decision.assoc_epoch
-                          << " nowEpoch=" << GetCurrentEpoch()
-                          << " mode=" << static_cast<uint32_t>(m_mode));
+        ack.reason_code = static_cast<uint8_t>(CfRejectReason::MODE_MISMATCH);
+        if (m_clusterDecisionAckSink)
+        {
+            m_clusterDecisionAckSink(ack, m_apId);
+        }
+        return;
+    }
+    if (decision.assoc_epoch != GetCurrentEpoch())
+    {
+        ack.reason_code = static_cast<uint8_t>(CfRejectReason::EPOCH_MISMATCH);
+        if (m_clusterDecisionAckSink)
+        {
+            m_clusterDecisionAckSink(ack, m_apId);
+        }
+        return;
+    }
+    UpdateLoadAndInterference();
+    if (m_loadQ >= m_loadMaxQ)
+    {
+        ack.reason_code = static_cast<uint8_t>(CfRejectReason::OVERLOAD);
+        if (m_clusterDecisionAckSink)
+        {
+            m_clusterDecisionAckSink(ack, m_apId);
+        }
         return;
     }
 
@@ -691,6 +780,13 @@ CfApMac::ReceiveClusterDecision(const ClusterDecision& decision)
         m_clusterMapPending[ueId] = remove;
         NS_LOG_DEBUG("AP " << m_apId << " pending removal ue=" << ueId
                            << " applyEpoch=" << remove.validFromEpoch);
+    }
+
+    ack.ok = 1;
+    ack.reason_code = static_cast<uint8_t>(CfRejectReason::NONE);
+    if (m_clusterDecisionAckSink)
+    {
+        m_clusterDecisionAckSink(ack, m_apId);
     }
 }
 

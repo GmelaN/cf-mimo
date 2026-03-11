@@ -183,6 +183,7 @@ main(int argc, char* argv[])
     uint32_t seed = 7;
     bool enableSnapshot = true;
     double apSpacingM = 80.0;
+    uint64_t ctrlBudgetBytesPerEpoch = 0;
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("mode", "distributed|centralized", modeStr);
@@ -200,6 +201,9 @@ main(int argc, char* argv[])
     cmd.AddValue("seed", "Random seed", seed);
     cmd.AddValue("enableSnapshot", "Print periodic snapshots", enableSnapshot);
     cmd.AddValue("apSpacingM", "AP spacing on line topology [m]", apSpacingM);
+    cmd.AddValue("ctrlBudgetBytesPerEpoch",
+                 "Control-plane offered-byte budget per epoch (0=disabled)",
+                 ctrlBudgetBytesPerEpoch);
     cmd.Parse(argc, argv);
 
     if (numUe == 0 || numAp == 0)
@@ -301,6 +305,8 @@ main(int argc, char* argv[])
 
     CfControlPlaneHelper cpHelper;
     cpHelper.SetMode(mode);
+    cpHelper.SetAssocInterval(tAssoc);
+    cpHelper.SetControlBudgetPerEpoch(ctrlBudgetBytesPerEpoch);
     cpHelper.SetProcessingTimes(MicroSeconds(apProcUs), MicroSeconds(ueProcUs), MicroSeconds(cpuProcUs));
     cpHelper.SetNetwork(apById, ueById, cpu);
     cpHelper.Install();
@@ -367,7 +373,8 @@ main(int argc, char* argv[])
     const double realtimeFactor = (wallSec > 0.0) ? (simSec / wallSec) : 0.0;
 
     const uint64_t totalCtrlTx = stats.ueStateReport.tx + stats.assocOffer.tx + stats.assocConfirm.tx +
-                                 stats.srBsr.tx + stats.apSummary.tx + stats.clusterDecision.tx +
+                                 stats.assocAck.tx + stats.srBsr.tx + stats.apSummary.tx +
+                                 stats.clusterDecision.tx + stats.clusterDecisionAck.tx +
                                  stats.centralizedAssocToUe.tx + stats.schedulingGrant.tx;
 
     const double ctrlMsgRate = (simSec > 0.0) ? (static_cast<double>(totalCtrlTx) / simSec) : 0.0;
@@ -397,9 +404,12 @@ main(int argc, char* argv[])
     std::cout << "UEStateReport: " << stats.ueStateReport.tx << " / " << stats.ueStateReport.rx << "\n";
     std::cout << "AssocOffer: " << stats.assocOffer.tx << " / " << stats.assocOffer.rx << "\n";
     std::cout << "AssocConfirm: " << stats.assocConfirm.tx << " / " << stats.assocConfirm.rx << "\n";
+    std::cout << "AssocAck: " << stats.assocAck.tx << " / " << stats.assocAck.rx << "\n";
     std::cout << "SR_BSR: " << stats.srBsr.tx << " / " << stats.srBsr.rx << "\n";
     std::cout << "APSummary: " << stats.apSummary.tx << " / " << stats.apSummary.rx << "\n";
     std::cout << "ClusterDecision: " << stats.clusterDecision.tx << " / " << stats.clusterDecision.rx << "\n";
+    std::cout << "ClusterDecisionAck: " << stats.clusterDecisionAck.tx << " / "
+              << stats.clusterDecisionAck.rx << "\n";
     std::cout << "CentralizedAssocToUe: " << stats.centralizedAssocToUe.tx << " / "
               << stats.centralizedAssocToUe.rx << "\n";
     std::cout << "SchedulingGrant: " << stats.schedulingGrant.tx << " / " << stats.schedulingGrant.rx << "\n";
@@ -414,6 +424,47 @@ main(int argc, char* argv[])
     std::cout << "CPU-RX: enq=" << cpuPipe.enqueued << " deliv=" << cpuPipe.delivered
               << " avgDelayMs=" << avgCpuDelayMs
               << " maxDelayMs=" << NsToMs(cpuPipe.maxDelayNs) << "\n";
+
+    const auto& epochStats = cpHelper.GetEpochStats();
+    uint64_t budgetExceedEpochs = 0;
+    uint64_t sumConfirmFanout = 0;
+    uint64_t sumAckFanout = 0;
+    uint64_t sumDecisionFanout = 0;
+    for (const auto& [_, ep] : epochStats)
+    {
+        if (ep.budgetExceed)
+        {
+            ++budgetExceedEpochs;
+        }
+        sumConfirmFanout += ep.distributedConfirmFanout;
+        sumAckFanout += ep.distributedAckFanout;
+        sumDecisionFanout += ep.centralizedDecisionFanout;
+    }
+    std::cout << "\n[Epoch Offered Load]\n";
+    std::cout << "epochs=" << epochStats.size() << " budgetBytesPerEpoch=" << ctrlBudgetBytesPerEpoch
+              << " budgetExceedEpochs=" << budgetExceedEpochs << "\n";
+    if (!epochStats.empty())
+    {
+        const double denom = static_cast<double>(epochStats.size());
+        std::cout << "avgDistributedConfirmFanoutPerEpoch=" << (sumConfirmFanout / denom) << "\n";
+        std::cout << "avgDistributedAckFanoutPerEpoch=" << (sumAckFanout / denom) << "\n";
+        std::cout << "avgCentralizedDecisionFanoutPerEpoch=" << (sumDecisionFanout / denom) << "\n";
+    }
+    const double distributedAckMissingRate =
+        (stats.assocConfirm.tx > 0)
+            ? (static_cast<double>(stats.assocConfirm.tx - std::min(stats.assocConfirm.tx, stats.assocAck.rx)) /
+               static_cast<double>(stats.assocConfirm.tx))
+            : 0.0;
+    const double distributedRejectRate =
+        (stats.assocAck.rx > 0) ? (static_cast<double>(stats.distributedRejectCount) / stats.assocAck.rx) : 0.0;
+    const double centralizedRejectRate =
+        (stats.clusterDecisionAck.rx > 0)
+            ? (static_cast<double>(stats.centralizedRejectCount) / stats.clusterDecisionAck.rx)
+            : 0.0;
+    std::cout << "\n[Consistency Metrics]\n";
+    std::cout << "distributedAckMissingRate=" << distributedAckMissingRate
+              << " distributedRejectRate=" << distributedRejectRate
+              << " centralizedRejectRate=" << centralizedRejectRate << "\n";
 
     return 0;
 }

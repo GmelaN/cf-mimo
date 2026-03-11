@@ -19,15 +19,196 @@
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
 #include "ns3/propagation-delay-model.h"
+#include "ns3/random-walk-2d-mobility-model.h"
+#include "ns3/rectangle.h"
 #include "ns3/simple-net-device.h"
 #include "ns3/spectrum-phy.h"
 #include "ns3/three-gpp-propagation-loss-model.h"
 
+#include <algorithm>
 #include <iostream>
 #include <map>
+#include <string>
+#include <tuple>
 #include <vector>
 
 using namespace ns3;
+
+namespace
+{
+
+enum class BaselineType : uint8_t
+{
+    MATCHED = 0,
+    DCC = 1,
+    FHAWARE = 2
+};
+
+BaselineType
+ParseBaseline(const std::string& s)
+{
+    if (s == "dcc")
+    {
+        return BaselineType::DCC;
+    }
+    if (s == "fhaware")
+    {
+        return BaselineType::FHAWARE;
+    }
+    return BaselineType::MATCHED;
+}
+
+std::string
+BaselineToString(BaselineType b)
+{
+    switch (b)
+    {
+    case BaselineType::MATCHED:
+        return "matched";
+    case BaselineType::DCC:
+        return "dcc";
+    case BaselineType::FHAWARE:
+        return "fhaware";
+    }
+    return "matched";
+}
+
+CfUeMac::DistributedClusterPolicy
+MakeDistributedPolicy(BaselineType baseline, std::map<AP_ID, uint16_t> fhCapByAp)
+{
+    return [baseline, fhCapByAp = std::move(fhCapByAp)](const std::vector<AssocOffer>& offers,
+                                                         const std::vector<UeApMeasurement>& meas,
+                                                         AP_ID& primary,
+                                                         uint8_t maxClusterSize,
+                                                         double lambda,
+                                                         uint16_t loadRejectThresholdQ) {
+        std::vector<AP_ID> members;
+        members.reserve(maxClusterSize);
+        primary = INVALID_AP_ID;
+        if (offers.empty())
+        {
+            for (const auto& m : meas)
+            {
+                if (members.size() >= maxClusterSize || m.ap_id == INVALID_AP_ID)
+                {
+                    break;
+                }
+                members.push_back(m.ap_id);
+            }
+            if (!members.empty())
+            {
+                primary = members.front();
+            }
+            return members;
+        }
+
+        if (baseline == BaselineType::MATCHED)
+        {
+            // Distributed approximation of two-stage AP selection:
+            // stage 1 primary by score-load, stage 2 strongest secondary by offer score.
+            std::vector<std::pair<double, AP_ID>> primaryRank;
+            primaryRank.reserve(offers.size());
+            for (const auto& o : offers)
+            {
+                primaryRank.emplace_back(static_cast<double>(o.score_q) - lambda * o.load_q, o.ap_id);
+            }
+            std::sort(primaryRank.begin(), primaryRank.end(), std::greater<>());
+            primary = primaryRank.front().second;
+            members.push_back(primary);
+
+            std::vector<AssocOffer> secondary = offers;
+            std::sort(secondary.begin(), secondary.end(), [](const AssocOffer& a, const AssocOffer& b) {
+                return a.score_q > b.score_q;
+            });
+            for (const auto& o : secondary)
+            {
+                if (members.size() >= maxClusterSize)
+                {
+                    break;
+                }
+                if (o.ap_id == primary || o.load_q > loadRejectThresholdQ)
+                {
+                    continue;
+                }
+                if (std::find(members.begin(), members.end(), o.ap_id) == members.end())
+                {
+                    members.push_back(o.ap_id);
+                }
+            }
+            return members;
+        }
+
+        if (baseline == BaselineType::DCC)
+        {
+            // DCC-style thresholding over large-scale measurements (RSRP/SINR proxy).
+            std::vector<std::tuple<int16_t, int16_t, AP_ID>> rank;
+            rank.reserve(meas.size());
+            for (const auto& m : meas)
+            {
+                if (m.ap_id != INVALID_AP_ID)
+                {
+                    rank.emplace_back(m.rsrp_q, m.sinr_q, m.ap_id);
+                }
+            }
+            if (rank.empty())
+            {
+                return members;
+            }
+            std::sort(rank.begin(), rank.end(), std::greater<>());
+            const int16_t bestRsrp = std::get<0>(rank.front());
+            const int16_t dccThreshold = static_cast<int16_t>(bestRsrp - 120); // 12 dB in q0.1-ish scale
+            primary = std::get<2>(rank.front());
+            for (const auto& [rsrpQ, _, apId] : rank)
+            {
+                if (members.size() >= maxClusterSize)
+                {
+                    break;
+                }
+                if (rsrpQ < dccThreshold)
+                {
+                    continue;
+                }
+                if (std::find(members.begin(), members.end(), apId) == members.end())
+                {
+                    members.push_back(apId);
+                }
+            }
+            if (members.empty())
+            {
+                members.push_back(primary);
+            }
+            return members;
+        }
+
+        // Fronthaul-aware distributed approximation:
+        // combine offer score, AP load, and static AP fronthaul headroom.
+        std::vector<std::pair<double, AP_ID>> rank;
+        rank.reserve(offers.size());
+        for (const auto& o : offers)
+        {
+            const double fhNorm = static_cast<double>(fhCapByAp.count(o.ap_id) ? fhCapByAp.at(o.ap_id) : 0) /
+                                  65535.0;
+            const double metric = static_cast<double>(o.score_q) - lambda * o.load_q + 50.0 * fhNorm;
+            rank.emplace_back(metric, o.ap_id);
+        }
+        std::sort(rank.begin(), rank.end(), std::greater<>());
+        primary = rank.front().second;
+        for (const auto& [_, apId] : rank)
+        {
+            if (members.size() >= maxClusterSize)
+            {
+                break;
+            }
+            if (std::find(members.begin(), members.end(), apId) == members.end())
+            {
+                members.push_back(apId);
+            }
+        }
+        return members;
+    };
+}
+
+} // namespace
 
 static Ptr<MultiModelSpectrumChannel>
 Create3gppChannel(double frequencyHz)
@@ -62,18 +243,78 @@ AttachNodeContext(Ptr<SpectrumPhy> phy, const Vector& v)
     phy->SetMobility(m);
 }
 
+static void
+AttachUeNodeContext(Ptr<SpectrumPhy> phy,
+                    const Vector& startPos,
+                    bool enableRandomWalk,
+                    double speedMps,
+                    double stepDistanceM,
+                    double minX,
+                    double maxX,
+                    double minY,
+                    double maxY)
+{
+    auto node = CreateObject<Node>();
+    auto dev = CreateObject<SimpleNetDevice>();
+    node->AddDevice(dev);
+    dev->SetNode(node);
+
+    Ptr<MobilityModel> m;
+    if (enableRandomWalk)
+    {
+        auto rw = CreateObject<RandomWalk2dMobilityModel>();
+        rw->SetAttribute("Mode", EnumValue(RandomWalk2dMobilityModel::MODE_DISTANCE));
+        rw->SetAttribute("Distance", DoubleValue(stepDistanceM));
+        rw->SetAttribute("Speed",
+                         StringValue("ns3::ConstantRandomVariable[Constant=" + std::to_string(speedMps) +
+                                     "]"));
+        rw->SetAttribute("Bounds", RectangleValue(Rectangle(minX, maxX, minY, maxY)));
+        rw->SetPosition(startPos);
+        m = rw;
+    }
+    else
+    {
+        auto c = CreateObject<ConstantPositionMobilityModel>();
+        c->SetPosition(startPos);
+        m = c;
+    }
+    node->AggregateObject(m);
+
+    phy->SetDevice(dev);
+    phy->SetMobility(m);
+}
+
 int
 main(int argc, char* argv[])
 {
     double simTimeMs = 600.0;
     std::string appRate = "10Mbps";
     uint32_t appPktSize = 900;
+    std::string baselineStr = "matched";
+    bool ueRandomWalk = false;
+    double ueWalkSpeedMps = 1.0;
+    double ueWalkStepDistanceM = 5.0;
+    double ueWalkMinX = -30.0;
+    double ueWalkMaxX = 180.0;
+    double ueWalkMinY = -40.0;
+    double ueWalkMaxY = 40.0;
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("simTimeMs", "Simulation time in milliseconds", simTimeMs);
     cmd.AddValue("appRate", "OnOff application data rate", appRate);
     cmd.AddValue("appPktSize", "OnOff packet size in bytes", appPktSize);
+    cmd.AddValue("baseline",
+                 "Distributed baseline policy: matched|dcc|fhaware",
+                 baselineStr);
+    cmd.AddValue("ueRandomWalk", "Enable RandomWalk2d mobility for UE", ueRandomWalk);
+    cmd.AddValue("ueWalkSpeedMps", "UE RandomWalk speed [m/s]", ueWalkSpeedMps);
+    cmd.AddValue("ueWalkStepDistanceM", "UE RandomWalk step distance [m]", ueWalkStepDistanceM);
+    cmd.AddValue("ueWalkMinX", "UE RandomWalk bound min X [m]", ueWalkMinX);
+    cmd.AddValue("ueWalkMaxX", "UE RandomWalk bound max X [m]", ueWalkMaxX);
+    cmd.AddValue("ueWalkMinY", "UE RandomWalk bound min Y [m]", ueWalkMinY);
+    cmd.AddValue("ueWalkMaxY", "UE RandomWalk bound max Y [m]", ueWalkMaxY);
     cmd.Parse(argc, argv);
+    const BaselineType baseline = ParseBaseline(baselineStr);
 
     NodeContainer nodes;
     nodes.Create(2); // 0: UE app node, 1: remote sink
@@ -109,11 +350,16 @@ main(int argc, char* argv[])
 
     std::map<AP_ID, Ptr<CfApMac>> apById;
     std::map<AP_ID, Ptr<CfApPhy>> apPhyById;
+    std::map<AP_ID, uint16_t> fhCapByAp;
     for (AP_ID apId = 1; apId <= 3; ++apId)
     {
         auto ap = CreateObject<CfApMac>();
         ap->SetApId(apId);
         ap->SetMode(CfMode::DISTRIBUTED);
+        // Static per-AP fronthaul headroom used by the fhaware baseline.
+        const uint16_t fhCap = static_cast<uint16_t>(45000 + (apId - 1) * 8000);
+        ap->SetFronthaulCap(fhCap);
+        fhCapByAp[apId] = fhCap;
         apById[apId] = ap;
     }
 
@@ -126,12 +372,21 @@ main(int argc, char* argv[])
     ueMac->SetMode(CfMode::DISTRIBUTED);
     ueMac->SetQueueBytes(0);
     ueMac->SetTrafficClass(1);
+    ueMac->SetDistributedClusterPolicy(MakeDistributedPolicy(baseline, fhCapByAp));
 
     auto uePhy = CreateObject<CfUePhy>();
     uePhy->SetUeId(ueMac->GetUeId());
     uePhy->SetPrbConfig(CfMimoConstants::MAX_PRB, prbBwHz, freqHz);
     uePhy->SetChannel(channel);
-    AttachNodeContext(uePhy, Vector(25.0, 0.0, 1.5));
+    AttachUeNodeContext(uePhy,
+                        Vector(25.0, 0.0, 1.5),
+                        ueRandomWalk,
+                        ueWalkSpeedMps,
+                        ueWalkStepDistanceM,
+                        ueWalkMinX,
+                        ueWalkMaxX,
+                        ueWalkMinY,
+                        ueWalkMaxY);
     channel->AddRx(uePhy);
     CfPhyMacHelper::BindUeMeasurementProvider(ueMac, uePhy);
 
@@ -193,6 +448,12 @@ main(int argc, char* argv[])
                 ueMac->ReceiveAssocOffer(offer);
             }
         });
+        ap->SetAssocAckSink([ueMac](const AssocAck& ack, UE_ID ueId) {
+            if (ueId == ueMac->GetUeId())
+            {
+                ueMac->ReceiveAssocAck(ack);
+            }
+        });
         CfPhyMacHelper::BindApGrantPath(ap, apPhyById[apId], ueMac, uePhy);
         ap->SetNeighborCoordSink([](const NeighborCoord&, AP_ID) {});
         ap->Start();
@@ -206,6 +467,8 @@ main(int argc, char* argv[])
 
     auto sink = DynamicCast<PacketSink>(sinkApps.Get(0));
     std::cout << "=== CF-MIMO App Traffic Example ===\n";
+    std::cout << "Baseline: " << BaselineToString(baseline) << "\n";
+    std::cout << "UE randomWalk: " << (ueRandomWalk ? "on" : "off") << "\n";
     std::cout << "Adapter attached to UE NetDevice(MacTx): " << (attached ? "yes" : "no") << "\n";
     std::cout << "Injected to CF queue (bytes/packets): " << trafficAdapter->GetTotalInjectedBytes()
               << " / " << trafficAdapter->GetTotalInjectedPackets() << "\n";

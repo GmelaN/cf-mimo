@@ -72,6 +72,13 @@ CfCpuController::SetMaxClusterSize(uint8_t maxClusterSize)
 }
 
 void
+CfCpuController::SetCentralizedClusterPolicy(CentralizedClusterPolicy policy)
+{
+    NS_LOG_FUNCTION(this);
+    m_policy = std::move(policy);
+}
+
+void
 CfCpuController::SetDecisionSink(DecisionSink cb)
 {
     NS_LOG_FUNCTION(this);
@@ -118,6 +125,14 @@ CfCpuController::ReceiveApSummary(const APSummary& summary)
 }
 
 void
+CfCpuController::ReceiveClusterDecisionAck(const ClusterDecisionAck& ack)
+{
+    NS_LOG_FUNCTION(this << ack.ap_id << ack.assoc_epoch << ack.cluster_ver
+                         << static_cast<uint32_t>(ack.ok));
+    m_decisionAckByEpoch[ack.assoc_epoch][ack.ap_id] = ack;
+}
+
+void
 CfCpuController::OnAssocTimer()
 {
     NS_LOG_FUNCTION(this);
@@ -143,14 +158,7 @@ CfCpuController::ComputeAndDispatch(uint32_t assocEpoch)
 
     m_state = CpuControllerState::CPU_DECIDE;
 
-    struct Candidate
-    {
-        AP_ID apId;
-        int16_t metricQ;
-        uint16_t loadQ;
-    };
-
-    std::map<UE_ID, std::vector<Candidate>> candidatesByUe;
+    std::map<UE_ID, std::vector<PolicyCandidate>> candidatesByUe;
     std::set<AP_ID> knownAps;
     for (const auto& [apId, summaryWithTs] : m_apSummaries)
     {
@@ -167,7 +175,8 @@ CfCpuController::ComputeAndDispatch(uint32_t assocEpoch)
             {
                 continue;
             }
-            candidatesByUe[ueId].push_back(Candidate{apId, summary.cand_metric_q[i], summary.load_q});
+            candidatesByUe[ueId].push_back(
+                PolicyCandidate{apId, summary.cand_metric_q[i], summary.load_q, summary.fh_cap_q});
         }
     }
     if (knownAps.empty())
@@ -185,38 +194,60 @@ CfCpuController::ComputeAndDispatch(uint32_t assocEpoch)
             continue;
         }
 
-        std::sort(candidates.begin(), candidates.end(), [this](const Candidate& lhs, const Candidate& rhs) {
-            const double lhsPrimary = static_cast<double>(lhs.metricQ) - m_lambda * lhs.loadQ;
-            const double rhsPrimary = static_cast<double>(rhs.metricQ) - m_lambda * rhs.loadQ;
-            return lhsPrimary > rhsPrimary;
-        });
-
-        const AP_ID primary = candidates.front().apId;
-        std::vector<AP_ID> cluster{primary};
-
-        std::sort(candidates.begin(), candidates.end(), [](const Candidate& lhs, const Candidate& rhs) {
-            return lhs.metricQ > rhs.metricQ;
-        });
-        for (const auto& cand : candidates)
+        PolicyResult selected;
+        if (m_policy)
         {
-            if (cluster.size() >= m_maxClusterSize)
+            selected = m_policy(ueId, candidates, m_maxClusterSize, m_lambda);
+        }
+        else
+        {
+            std::sort(candidates.begin(),
+                      candidates.end(),
+                      [this](const PolicyCandidate& lhs, const PolicyCandidate& rhs) {
+                          const double lhsPrimary =
+                              static_cast<double>(lhs.metricQ) - m_lambda * lhs.loadQ;
+                          const double rhsPrimary =
+                              static_cast<double>(rhs.metricQ) - m_lambda * rhs.loadQ;
+                          return lhsPrimary > rhsPrimary;
+                      });
+            selected.primary = candidates.front().apId;
+            selected.members.push_back(selected.primary);
+
+            std::sort(candidates.begin(),
+                      candidates.end(),
+                      [](const PolicyCandidate& lhs, const PolicyCandidate& rhs) {
+                          return lhs.metricQ > rhs.metricQ;
+                      });
+            for (const auto& cand : candidates)
             {
-                break;
+                if (selected.members.size() >= m_maxClusterSize)
+                {
+                    break;
+                }
+                if (std::find(selected.members.begin(), selected.members.end(), cand.apId) !=
+                    selected.members.end())
+                {
+                    continue;
+                }
+                selected.members.push_back(cand.apId);
             }
-            if (std::find(cluster.begin(), cluster.end(), cand.apId) != cluster.end())
-            {
-                continue;
-            }
-            cluster.push_back(cand.apId);
+        }
+        if (selected.members.empty())
+        {
+            continue;
+        }
+        if (selected.primary == INVALID_AP_ID)
+        {
+            selected.primary = selected.members.front();
         }
 
-        for (const auto apId : cluster)
+        for (const auto apId : selected.members)
         {
             assignmentsPerAp[apId].push_back(
-                {ueId, apId == primary ? CfRoleFlag::PRIMARY : CfRoleFlag::SECONDARY});
+                {ueId, apId == selected.primary ? CfRoleFlag::PRIMARY : CfRoleFlag::SECONDARY});
         }
-        NS_LOG_DEBUG("CPU UE " << ueId << " primary=" << primary
-                               << " clusterSize=" << cluster.size());
+        NS_LOG_DEBUG("CPU UE " << ueId << " primary=" << selected.primary
+                               << " clusterSize=" << selected.members.size());
     }
 
     m_state = CpuControllerState::CPU_DISPATCH;

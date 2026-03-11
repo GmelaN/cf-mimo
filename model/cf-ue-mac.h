@@ -29,9 +29,17 @@ class CfUeMac : public Object
 
     using StateReportSink = std::function<void(const UEStateReport&, AP_ID)>;
     using AssocConfirmSink = std::function<void(const AssocConfirm&, AP_ID)>;
+    using AssocAckSink = std::function<void(const AssocAck&, AP_ID)>;
     using SrBsrSink = std::function<void(const SR_BSR&, AP_ID)>;
     using RxStatusSink = std::function<void(const RxStatus&, AP_ID)>;
     using LinkMeasurementProvider = std::function<std::vector<UeApMeasurement>()>;
+    using DistributedClusterPolicy =
+        std::function<std::vector<AP_ID>(const std::vector<AssocOffer>&,
+                                         const std::vector<UeApMeasurement>&,
+                                         AP_ID&,
+                                         uint8_t,
+                                         double,
+                                         uint16_t)>;
 
     void SetUeId(UE_ID ueId);
     UE_ID GetUeId() const;
@@ -41,6 +49,7 @@ class CfUeMac : public Object
 
     void SetIntervals(Time tti, Time tState, Time tAssoc);
     void SetOfferWindow(Time offerWindow);
+    void SetAssocAckDeadline(Time ackDeadline);
 
     void SetTopNAp(uint8_t topNAp);
     void SetMaxClusterSize(uint8_t maxClusterSize);
@@ -53,6 +62,7 @@ class CfUeMac : public Object
 
     void SetStateReportSink(StateReportSink cb);
     void SetAssocConfirmSink(AssocConfirmSink cb);
+    void SetDistributedClusterPolicy(DistributedClusterPolicy policy);
     void SetSrBsrSink(SrBsrSink cb);
     void SetRxStatusSink(RxStatusSink cb);
     void SetLinkMeasurementProvider(LinkMeasurementProvider cb);
@@ -61,6 +71,7 @@ class CfUeMac : public Object
     void Stop();
 
     void ReceiveAssocOffer(const AssocOffer& offer);
+    void ReceiveAssocAck(const AssocAck& ack);
     void ReceiveSchedulingGrant(const SchedulingGrant& grant);
     void ReceiveCentralizedAssoc(const AssocConfirm& confirm);
 
@@ -88,11 +99,13 @@ class CfUeMac : public Object
     void OnStateReportTimer();
     void OnAssocTimer();
     void OnAssocDecisionTimer(uint32_t assocEpoch);
+    void OnAssocAckDeadline(uint32_t assocEpoch, uint32_t clusterVer);
     void OnTtiTimer();
 
     void BuildAndSendStateReport();
     void DecideDistributedCluster(uint32_t assocEpoch);
     void ApplyPendingClusterIfDue();
+    void RollbackAssocAttempt(uint8_t reasonCode);
 
     void SendSrBsr();
     void ConsumeGrant();
@@ -109,6 +122,7 @@ class CfUeMac : public Object
     Time m_tState{MilliSeconds(10)};
     Time m_tAssoc{MilliSeconds(100)};
     Time m_offerWindow{MilliSeconds(5)};
+    Time m_assocAckDeadline{MilliSeconds(8)};
 
     uint8_t m_topNAp{CfMimoConstants::TOP_N_AP};
     uint8_t m_maxClusterSize{CfMimoConstants::MAX_CLUSTER_SIZE};
@@ -125,6 +139,18 @@ class CfUeMac : public Object
     std::vector<UeApMeasurement> m_measurementCache;
     std::map<AP_ID, AssocOffer> m_offerBuffer;
 
+    struct AssocAttempt
+    {
+        bool active{false};
+        uint32_t assocEpoch{0};
+        uint32_t clusterVer{0};
+        AP_ID primaryAp{INVALID_AP_ID};
+        uint8_t clusterSize{0};
+        std::array<AP_ID, CfMimoConstants::MAX_CLUSTER_SIZE> members{MakeInvalidClusterMembers()};
+        std::map<AP_ID, bool> ackByAp;
+    };
+    AssocAttempt m_assocAttempt;
+
     PendingCluster m_pendingCluster;
     AP_ID m_primaryApActive{INVALID_AP_ID};
     uint32_t m_clusterVerActive{0};
@@ -136,6 +162,7 @@ class CfUeMac : public Object
 
     StateReportSink m_stateReportSink;
     AssocConfirmSink m_assocConfirmSink;
+    DistributedClusterPolicy m_distributedClusterPolicy;
     SrBsrSink m_srBsrSink;
     RxStatusSink m_rxStatusSink;
     LinkMeasurementProvider m_linkMeasurementProvider;
@@ -143,6 +170,7 @@ class CfUeMac : public Object
     EventId m_stateReportEvent;
     EventId m_assocEvent;
     EventId m_assocDecisionEvent;
+    EventId m_assocAckDeadlineEvent;
     EventId m_ttiEvent;
 };
 

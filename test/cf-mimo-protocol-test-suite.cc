@@ -59,6 +59,12 @@ class CfMimoDistributedProtocolTestCase : public TestCase
                 ue->ReceiveAssocOffer(offer);
             }
         });
+        ap->SetAssocAckSink([&](const AssocAck& ack, UE_ID ueId) {
+            if (ueId == 1)
+            {
+                ue->ReceiveAssocAck(ack);
+            }
+        });
 
         ue->SetAssocConfirmSink([&](const AssocConfirm& confirm, AP_ID apId) {
             if (apId == 1)

@@ -27,9 +27,11 @@ class CfApMac : public Object
     ~CfApMac() override;
 
     using OfferSink = std::function<void(const AssocOffer&, UE_ID)>;
+    using AssocAckSink = std::function<void(const AssocAck&, UE_ID)>;
     using GrantSink = std::function<void(const SchedulingGrant&, UE_ID)>;
     using NeighborCoordSink = std::function<void(const NeighborCoord&, AP_ID)>;
     using ApSummarySink = std::function<void(const APSummary&)>;
+    using ClusterDecisionAckSink = std::function<void(const ClusterDecisionAck&, AP_ID)>;
 
     void SetApId(AP_ID apId);
     AP_ID GetApId() const;
@@ -43,12 +45,15 @@ class CfApMac : public Object
     void SetScoringWeights(double w1, double w2, double w3);
     void SetScoreThreshold(int16_t scoreThresholdQ);
     void SetLoadLimit(uint16_t loadMaxQ);
+    void SetFronthaulCap(uint16_t fhCapQ);
     void SetMaxUePerSched(uint8_t maxUePerSched);
 
     void SetOfferSink(OfferSink cb);
+    void SetAssocAckSink(AssocAckSink cb);
     void SetGrantSink(GrantSink cb);
     void SetNeighborCoordSink(NeighborCoordSink cb);
     void SetApSummarySink(ApSummarySink cb);
+    void SetClusterDecisionAckSink(ClusterDecisionAckSink cb);
 
     void Start();
     void Stop();
@@ -125,6 +130,7 @@ class CfApMac : public Object
 
     bool m_running{false};
     uint16_t m_loadQ{0};
+    uint16_t m_fhCapQ{65535};
     uint16_t m_interfQ{0};
     uint32_t m_clusterVerActive{0};
 
@@ -137,9 +143,11 @@ class CfApMac : public Object
     std::map<UE_ID, Assignment> m_clusterMapPending;
 
     OfferSink m_offerSink;
+    AssocAckSink m_assocAckSink;
     GrantSink m_grantSink;
     NeighborCoordSink m_neighborCoordSink;
     ApSummarySink m_apSummarySink;
+    ClusterDecisionAckSink m_clusterDecisionAckSink;
 
     EventId m_cohEvent;
     EventId m_coordEvent;
