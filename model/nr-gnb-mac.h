@@ -6,6 +6,8 @@
 #define NR_GNB_MAC_H
 
 #include "nr-ccm-mac-sap.h"
+#include "nr-dl-cluster-coordinator.h"
+#include "nr-dl-cluster-context-manager.h"
 #include "nr-gnb-cmac-sap.h"
 #include "nr-mac-pdu-info.h"
 #include "nr-mac-sap.h"
@@ -22,6 +24,7 @@ namespace ns3
 class NrControlMessage;
 class NrRarMessage;
 class BeamId;
+class NrGnbPhy;
 
 /**
  * @ingroup gnb-mac
@@ -174,6 +177,14 @@ class NrGnbMac : public Object
      * @param rnti RNTI of the user
      */
     void BeamChangeReport(BeamId beamId, uint8_t rnti);
+
+    void SetDlClusterContextManager(const Ptr<NrDlClusterContextManager>& contextManager);
+
+    Ptr<NrDlClusterContextManager> GetDlClusterContextManager() const;
+
+    void SetDlClusterSelfPhy(const Ptr<NrGnbPhy>& phy);
+
+    void RegisterDlClusterPeerPhy(uint16_t cellId, const Ptr<NrGnbPhy>& phy);
 
     /**
      * TracedCallback signature for DL and UL data scheduling events.
@@ -329,6 +340,16 @@ class NrGnbMac : public Object
      * Clears m_rapIdRntiMap.
      */
     void DoBuildRarList(SlotAllocInfo& slotAllocInfo);
+    std::vector<uint16_t> ResolveDlClusterPeers(const SfnSf& sfn,
+                                                const std::shared_ptr<DciInfoElementTdma>& dci);
+    void MirrorDlAllocationToClusterPeers(const SfnSf& sfn,
+                                          const std::shared_ptr<DciInfoElementTdma>& dci,
+                                          const std::vector<uint16_t>& peerCellIds);
+    void MirrorMacPduToClusterPeers(uint32_t tbMapKey,
+                                    const Ptr<Packet>& p,
+                                    const SfnSf& sfn,
+                                    uint8_t symStart,
+                                    uint16_t rnti);
 
   private:
     bool HasMsg3Allocations(const SlotAllocInfo& slotInfo);
@@ -402,6 +423,10 @@ class NrGnbMac : public Object
     std::vector<UlHarqInfo> m_ulHarqInfoReceived; // UL HARQ feedback received
     std::unordered_map<uint16_t, NrDlHarqProcessesBuffer_t>
         m_miDlHarqProcessesPackets; // Packet under transmission of the DL HARQ process
+    Ptr<NrDlClusterContextManager> m_dlClusterContextManager;
+    Ptr<NrGnbPhy> m_dlClusterSelfPhy;
+    std::unordered_map<uint16_t, Ptr<NrGnbPhy>> m_dlClusterPeerPhys;
+    std::unordered_map<uint32_t, std::vector<uint16_t>> m_dlClusterPeersByTb;
 
     TracedCallback<NrSchedulingCallbackInfo> m_dlScheduling;
     TracedCallback<NrSchedulingCallbackInfo> m_ulScheduling;

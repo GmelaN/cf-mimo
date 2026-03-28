@@ -27,6 +27,8 @@ NrSpectrumSignalParametersDataFrame::NrSpectrumSignalParametersDataFrame(
     NS_LOG_FUNCTION(this << &p);
     cellId = p.cellId;
     rnti = p.rnti;
+    jointTxGroupId = p.jointTxGroupId;
+    perfectInterClusterSuppression = p.perfectInterClusterSuppression;
     if (p.packetBurst)
     {
         packetBurst = p.packetBurst->Copy();

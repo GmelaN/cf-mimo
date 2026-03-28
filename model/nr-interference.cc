@@ -131,7 +131,9 @@ NrInterference::ConditionallyEvaluateChunk()
     {
         NS_LOG_LOGIC(this << " signal = " << *m_rxSignal << " allSignals = " << *m_allSignals
                           << " noise = " << *m_noise);
-        SpectrumValue interf = (*m_allSignals) - (*m_rxSignal) + (*m_noise);
+        SpectrumValue interf = HasPerfectInterClusterSuppression()
+                                   ? SpectrumValue(*m_noise)
+                                   : ((*m_allSignals) - (*m_rxSignal) + (*m_noise));
         SpectrumValue sinr = (*m_rxSignal) / interf;
         double rbWidth = (*m_rxSignal).GetSpectrumModel()->Begin()->fh -
                          (*m_rxSignal).GetSpectrumModel()->Begin()->fl;
@@ -350,7 +352,6 @@ NrInterference::AddSignalMimo(Ptr<const SpectrumSignalParameters> params, const 
 void
 NrInterference::StartRxMimo(Ptr<const SpectrumSignalParameters> params)
 {
-    auto rxPsd = params->psd;
     if (!m_receiving)
     {
         // This must be the first receive signal, clear any lingering previous signals
@@ -362,7 +363,7 @@ NrInterference::StartRxMimo(Ptr<const SpectrumSignalParameters> params)
         // Clear the list of stored chunks
         cp->Start();
     }
-    NrInterferenceBase::StartRx(rxPsd);
+    NrInterferenceBase::StartRx(params);
 }
 
 void
@@ -420,6 +421,11 @@ NrInterference::CalcOutOfCellInterfCov() const
         }
     }
 
+    if (HasPerfectInterClusterSuppression())
+    {
+        return allSignalsNoiseCov;
+    }
+
     // Add all external interference signals to the covariance matrix
     for (const auto& intfSignal : m_allSignalsMimo)
     {
@@ -441,6 +447,11 @@ NrInterference::CalcCurrInterfCov(Ptr<const SpectrumSignalParameters> rxSignal,
 {
     // Add also the potential interfering signals intended for this device but belonging to other
     // transmissions. This is required for a gNB receiving MU-MIMO UL signals from multiple UEs
+    if (HasPerfectInterClusterSuppression())
+    {
+        return outOfCellInterfCov;
+    }
+
     auto interfNoiseCov = outOfCellInterfCov;
     for (auto& otherSignal : m_rxSignalsMimo)
     {

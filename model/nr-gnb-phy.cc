@@ -1242,6 +1242,12 @@ NrGnbPhy::RetrieveDciFromAllocation(const SlotAllocInfo& alloc,
                                                               // message, we cannot also send UL DCI
             && dlAlloc.m_dci->m_format == format)
         {
+            if (format == DciInfoElementTdma::DL &&
+                IsClusteredDlAllocation(alloc.m_sfnSf, dlAlloc.m_dci))
+            {
+                continue;
+            }
+
             auto& dciElem = dlAlloc.m_dci;
             NS_ASSERT(dciElem->m_format == format);
             NS_ASSERT_MSG(dciElem->m_symStart + dciElem->m_numSym <= GetSymbolsPerSlot(),
@@ -1480,11 +1486,38 @@ NrGnbPhy::DlData(const std::shared_ptr<DciInfoElementTdma>& dci)
                                                    << +dci->m_rnti);
 
     Time varTtiPeriod = GetSymbolPeriod() * dci->m_numSym;
+    const auto allocationKey =
+        m_currentSlot.GetEncodingWithSymStartRnti(dci->m_symStart, dci->m_rnti);
+    const bool isClusteredExecution = m_clusteredDlAllocations.contains(allocationKey);
+    if (isClusteredExecution)
+    {
+        m_clusteredDlAllocations.erase(allocationKey);
+        m_activeClusteredDlExecutions.insert(allocationKey);
+        auto contextIt = m_clusteredDlTxContexts.find(allocationKey);
+        if (contextIt != m_clusteredDlTxContexts.end())
+        {
+            m_activeClusteredDlTxContexts[allocationKey] = contextIt->second;
+            m_clusteredDlTxContexts.erase(contextIt);
+        }
+        if (m_spectrumPhy != nullptr)
+        {
+            m_spectrumPhy->SetClusterDlExecutorOnly(true);
+        }
+    }
 
     Ptr<PacketBurst> pktBurst = GetPacketBurst(m_currentSlot, dci->m_symStart, dci->m_rnti);
 
     if (!pktBurst || pktBurst->GetNPackets() == 0)
     {
+        if (isClusteredExecution)
+        {
+            m_activeClusteredDlExecutions.erase(allocationKey);
+            m_activeClusteredDlTxContexts.erase(allocationKey);
+            if (m_activeClusteredDlExecutions.empty() && m_spectrumPhy != nullptr)
+            {
+                m_spectrumPhy->SetClusterDlExecutorOnly(false);
+            }
+        }
         // sometimes the UE will be scheduled when no data is queued.
         // In this case, don't send anything, don't put power... do nothing!
         return varTtiPeriod;
@@ -1683,6 +1716,19 @@ NrGnbPhy::EndVarTti(const std::shared_ptr<DciInfoElementTdma>& lastDci)
 {
     NS_LOG_FUNCTION(this << Simulator::Now().GetSeconds());
 
+    if (lastDci != nullptr && lastDci->m_format == DciInfoElementTdma::DL &&
+        lastDci->m_type == DciInfoElementTdma::DATA)
+    {
+        const auto allocationKey =
+            m_currentSlot.GetEncodingWithSymStartRnti(lastDci->m_symStart, lastDci->m_rnti);
+        m_activeClusteredDlExecutions.erase(allocationKey);
+        m_activeClusteredDlTxContexts.erase(allocationKey);
+        if (m_activeClusteredDlExecutions.empty() && m_spectrumPhy != nullptr)
+        {
+            m_spectrumPhy->SetClusterDlExecutorOnly(false);
+        }
+    }
+
     NS_LOG_DEBUG("DCI started at symbol "
                  << static_cast<uint32_t>(lastDci->m_symStart) << " which lasted for "
                  << static_cast<uint32_t>(lastDci->m_numSym) << " symbols finished");
@@ -1720,36 +1766,60 @@ NrGnbPhy::SendDataChannels(const Ptr<PacketBurst>& pb,
                            const std::shared_ptr<DciInfoElementTdma>& dci)
 {
     NS_LOG_FUNCTION(this);
+    const bool isClusteredExecution =
+        m_activeClusteredDlExecutions.contains(
+            m_currentSlot.GetEncodingWithSymStartRnti(dci->m_symStart, dci->m_rnti));
+    const auto allocationKey =
+        m_currentSlot.GetEncodingWithSymStartRnti(dci->m_symStart, dci->m_rnti);
+    uint16_t logicalCellId = GetCellId();
+    uint64_t jointTxGroupId = 0;
+    bool perfectInterClusterSuppression = false;
+    auto activeContextIt = m_activeClusteredDlTxContexts.find(allocationKey);
+    if (activeContextIt != m_activeClusteredDlTxContexts.end())
+    {
+        logicalCellId = activeContextIt->second.logicalCellId;
+        jointTxGroupId = activeContextIt->second.jointTxGroupId;
+        perfectInterClusterSuppression = activeContextIt->second.perfectInterClusterSuppression;
+    }
     // update beamforming vectors (currently supports 1 user only)
+    if (isClusteredExecution)
+    {
+        ChangeToQuasiOmniBeamformingVector();
+    }
 
     // In each time instance, there can only be a single BF vector. Only update BF vectors once
     // unless time has changed
-    if (Simulator::Now() > m_lastBfChange)
+    if (!isClusteredExecution && Simulator::Now() > m_lastBfChange)
     {
-        NS_ASSERT_MSG(!m_spectrumPhy->IsTransmitting(),
-                      "Cannot change analog BF after TX has started");
-        m_lastBfChange = Simulator::Now();
-        bool found = false;
-        for (auto& i : m_deviceMap)
+        if (m_spectrumPhy->IsTransmitting())
         {
-            Ptr<NrUeNetDevice> ueDev = DynamicCast<NrUeNetDevice>(i);
-            uint64_t ueRnti = (DynamicCast<NrUePhy>(ueDev->GetPhy(GetBwpId())))->GetRnti();
-            if (dci->m_rnti == ueRnti)
-            {
-                if (DynamicCast<UniformPlanarArray>(m_spectrumPhy->GetAntenna()))
-                {
-                    ChangeBeamformingVector(i);
-                }
-
-                found = true;
-                break;
-            }
+            NS_LOG_WARN("Skipping analog BF update because TX has already started for this PHY");
         }
-        // In case UE was not attached via NrHelper::AttachToGnb(),
-        // assume quasi omni beamforming until we have the opportunity to scan for a beam
-        if (!found)
+        else
         {
-            ChangeBeamformingVector(nullptr);
+            m_lastBfChange = Simulator::Now();
+            bool found = false;
+            for (auto& i : m_deviceMap)
+            {
+                Ptr<NrUeNetDevice> ueDev = DynamicCast<NrUeNetDevice>(i);
+                uint64_t ueRnti = (DynamicCast<NrUePhy>(ueDev->GetPhy(GetBwpId())))->GetRnti();
+                if (dci->m_rnti == ueRnti)
+                {
+                    if (DynamicCast<UniformPlanarArray>(m_spectrumPhy->GetAntenna()))
+                    {
+                        ChangeBeamformingVector(i);
+                    }
+
+                    found = true;
+                    break;
+                }
+            }
+            // In case UE was not attached via NrHelper::AttachToGnb(),
+            // assume quasi omni beamforming until we have the opportunity to scan for a beam
+            if (!found)
+            {
+                ChangeBeamformingVector(nullptr);
+            }
         }
     }
 
@@ -1763,7 +1833,13 @@ NrGnbPhy::SendDataChannels(const Ptr<PacketBurst>& pb,
     SetSubChannels(FromRBGBitmaskToRBAssignment(dci->m_rbgBitmask), nTotalAllocRbs);
 
     std::list<Ptr<NrControlMessage>> ctrlMsgs;
-    m_spectrumPhy->StartTxDataFrames(pb, ctrlMsgs, dci, varTtiPeriod);
+    m_spectrumPhy->StartTxDataFrames(pb,
+                                     ctrlMsgs,
+                                     dci,
+                                     varTtiPeriod,
+                                     logicalCellId,
+                                     jointTxGroupId,
+                                     perfectInterClusterSuppression);
 }
 
 void
@@ -1865,6 +1941,63 @@ NrGnbPhy::PhyDataPacketReceived(const Ptr<Packet>& p)
                                    &NrGnbPhySapUser::ReceivePhyPdu,
                                    m_phySapUser,
                                    p);
+}
+
+void
+NrGnbPhy::PushBackClusteredDlAllocation(const SfnSf& sfn,
+                                        const std::shared_ptr<DciInfoElementTdma>& dci,
+                                        const ClusteredDlTxContext& context)
+{
+    NS_LOG_FUNCTION(this << sfn);
+    NS_ABORT_MSG_IF(dci == nullptr, "Cannot mirror a null DCI into a clustered DL allocation");
+    NS_ABORT_MSG_IF(dci->m_format != DciInfoElementTdma::DL,
+                    "Clustered DL mirroring only supports DL allocations");
+    NS_ABORT_MSG_IF(dci->m_type != DciInfoElementTdma::DATA,
+                    "Clustered DL mirroring only supports DATA allocations");
+
+    SlotAllocInfo slotAllocInfo(sfn);
+    slotAllocInfo.m_varTtiAllocInfo.emplace_back(dci);
+    slotAllocInfo.m_numSymAlloc += dci->m_numSym;
+    slotAllocInfo.m_type = SlotAllocInfo::DL;
+    PushBackSlotAllocInfo(slotAllocInfo);
+    auto allocationKey = sfn.GetEncodingWithSymStartRnti(dci->m_symStart, dci->m_rnti);
+    m_clusteredDlAllocations.insert(allocationKey);
+    m_clusteredDlTxContexts[allocationKey] = context;
+}
+
+void
+NrGnbPhy::RegisterClusteredDlTxContext(const SfnSf& sfn,
+                                       const std::shared_ptr<DciInfoElementTdma>& dci,
+                                       const ClusteredDlTxContext& context)
+{
+    NS_ABORT_MSG_IF(dci == nullptr, "Cannot register clustered DL context for a null DCI");
+    m_clusteredDlTxContexts[sfn.GetEncodingWithSymStartRnti(dci->m_symStart, dci->m_rnti)] =
+        context;
+}
+
+void
+NrGnbPhy::SetClusterDlExecutorOnly(bool enable)
+{
+    m_clusterDlExecutorOnly = enable;
+    if (m_spectrumPhy != nullptr)
+    {
+        m_spectrumPhy->SetClusterDlExecutorOnly(enable);
+    }
+}
+
+bool
+NrGnbPhy::IsClusterDlExecutorOnly() const
+{
+    return m_spectrumPhy != nullptr ? m_spectrumPhy->IsClusterDlExecutorOnly() : m_clusterDlExecutorOnly;
+}
+
+bool
+NrGnbPhy::IsClusteredDlAllocation(const SfnSf& sfn,
+                                  const std::shared_ptr<DciInfoElementTdma>& dci) const
+{
+    NS_ABORT_MSG_IF(dci == nullptr, "Cannot inspect a null DCI");
+    return m_clusteredDlAllocations.contains(
+        sfn.GetEncodingWithSymStartRnti(dci->m_symStart, dci->m_rnti));
 }
 
 void

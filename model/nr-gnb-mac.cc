@@ -13,6 +13,7 @@
 #include "beam-id.h"
 #include "nr-common.h"
 #include "nr-control-messages.h"
+#include "nr-gnb-phy.h"
 #include "nr-mac-header-fs-ul.h"
 #include "nr-mac-header-vs.h"
 #include "nr-mac-pdu-info.h"
@@ -485,6 +486,9 @@ NrGnbMac::DoDispose()
     m_ulCqiReceived.clear();
     m_ulCeReceived.clear();
     m_miDlHarqProcessesPackets.clear();
+    m_dlClusterPeersByTb.clear();
+    m_dlClusterPeerPhys.clear();
+    m_dlClusterContextManager = nullptr;
     delete m_macSapProvider;
     delete m_cmacSapProvider;
     delete m_macSchedSapUser;
@@ -1144,6 +1148,11 @@ NrGnbMac::DoTransmitPdu(NrMacSapProvider::TransmitPduParameters params)
                                  it->second.m_sfnSf,
                                  it->second.m_dci->m_symStart,
                                  params.rnti);
+    MirrorMacPduToClusterPeers(tbMapKey,
+                               params.pdu,
+                               it->second.m_sfnSf,
+                               it->second.m_dci->m_symStart,
+                               params.rnti);
 }
 
 void
@@ -1262,6 +1271,17 @@ NrGnbMac::DoSchedConfigIndication(NrMacSchedSapUser::SchedConfigIndParameters in
                 harqIt->second.at(harqId).m_pktBurst = pb;
                 harqIt->second.at(harqId).m_lcidList.clear();
 
+                auto peerCellIds = ResolveDlClusterPeers(ind.m_sfnSf, dciElem);
+                if (!peerCellIds.empty())
+                {
+                    m_dlClusterPeersByTb[tbMapKey] = peerCellIds;
+                    MirrorDlAllocationToClusterPeers(ind.m_sfnSf, dciElem, peerCellIds);
+                }
+                else
+                {
+                    m_dlClusterPeersByTb.erase(tbMapKey);
+                }
+
                 auto pduMapIt = mapRet.first;
                 // for each LC j
                 for (auto& j : rlcPduInfo)
@@ -1306,6 +1326,8 @@ NrGnbMac::DoSchedConfigIndication(NrMacSchedSapUser::SchedConfigIndParameters in
                 NS_LOG_INFO("DL retransmission");
                 if (dciElem->m_tbSize > 0)
                 {
+                    auto peerCellIds = ResolveDlClusterPeers(ind.m_sfnSf, dciElem);
+                    MirrorDlAllocationToClusterPeers(ind.m_sfnSf, dciElem, peerCellIds);
                     auto it = m_miDlHarqProcessesPackets.find(rnti);
                     NS_ASSERT(it != m_miDlHarqProcessesPackets.end());
                     Ptr<PacketBurst> pb = it->second.at(harqId).m_pktBurst;
@@ -1316,6 +1338,12 @@ NrGnbMac::DoSchedConfigIndication(NrMacSchedSapUser::SchedConfigIndParameters in
                                                      ind.m_sfnSf,
                                                      dciElem->m_symStart,
                                                      dciElem->m_rnti);
+                        uint32_t tbMapKey = ((rnti & 0xFFFF) << 8) | (harqId & 0xFF);
+                        MirrorMacPduToClusterPeers(tbMapKey,
+                                                   pkt,
+                                                   ind.m_sfnSf,
+                                                   dciElem->m_symStart,
+                                                   dciElem->m_rnti);
                     }
                 }
             }
@@ -1400,6 +1428,31 @@ NrGnbMac::BeamChangeReport(BeamId beamId, uint8_t rnti)
     m_macCschedSapProvider->CschedUeConfigReq(params);
 }
 
+void
+NrGnbMac::SetDlClusterContextManager(const Ptr<NrDlClusterContextManager>& contextManager)
+{
+    m_dlClusterContextManager = contextManager;
+}
+
+Ptr<NrDlClusterContextManager>
+NrGnbMac::GetDlClusterContextManager() const
+{
+    return m_dlClusterContextManager;
+}
+
+void
+NrGnbMac::SetDlClusterSelfPhy(const Ptr<NrGnbPhy>& phy)
+{
+    m_dlClusterSelfPhy = phy;
+}
+
+void
+NrGnbMac::RegisterDlClusterPeerPhy(uint16_t cellId, const Ptr<NrGnbPhy>& phy)
+{
+    NS_ABORT_MSG_IF(phy == nullptr, "Cannot register a null peer PHY");
+    m_dlClusterPeerPhys[cellId] = phy;
+}
+
 uint16_t
 NrGnbMac::GetBwpId() const
 {
@@ -1423,6 +1476,90 @@ NrGnbMac::GetCellId() const
     else
     {
         return UINT16_MAX;
+    }
+}
+
+std::vector<uint16_t>
+NrGnbMac::ResolveDlClusterPeers(const SfnSf& sfn, const std::shared_ptr<DciInfoElementTdma>& dci)
+{
+    if (m_dlClusterContextManager == nullptr || dci == nullptr || dci->m_format != DciInfoElementTdma::DL ||
+        dci->m_type != DciInfoElementTdma::DATA)
+    {
+        return {};
+    }
+
+    if (!m_dlClusterContextManager->HasAssociation(dci->m_rnti))
+    {
+        return {};
+    }
+
+    auto grant =
+        m_dlClusterContextManager->CreateDlGrant(dci->m_rnti, sfn.GetEncoding(), dci->m_tbSize, dci->m_mcs);
+    if (!grant.granted)
+    {
+        return {};
+    }
+
+    std::vector<uint16_t> peers;
+    for (auto cellId : grant.selectedApCellIds)
+    {
+        if (cellId != GetCellId())
+        {
+            peers.push_back(cellId);
+        }
+    }
+    return peers;
+}
+
+void
+NrGnbMac::MirrorDlAllocationToClusterPeers(const SfnSf& sfn,
+                                           const std::shared_ptr<DciInfoElementTdma>& dci,
+                                           const std::vector<uint16_t>& peerCellIds)
+{
+    NrGnbPhy::ClusteredDlTxContext context;
+    context.logicalCellId = GetCellId();
+    context.jointTxGroupId = (static_cast<uint64_t>(context.logicalCellId) << 16) | dci->m_rnti;
+    context.perfectInterClusterSuppression = true;
+
+    if (m_dlClusterSelfPhy != nullptr)
+    {
+        m_dlClusterSelfPhy->RegisterClusteredDlTxContext(sfn, dci, context);
+    }
+
+    for (auto cellId : peerCellIds)
+    {
+        auto it = m_dlClusterPeerPhys.find(cellId);
+        if (it == m_dlClusterPeerPhys.end())
+        {
+            continue;
+        }
+        it->second->PushBackClusteredDlAllocation(sfn,
+                                                  std::make_shared<DciInfoElementTdma>(*dci),
+                                                  context);
+    }
+}
+
+void
+NrGnbMac::MirrorMacPduToClusterPeers(uint32_t tbMapKey,
+                                     const Ptr<Packet>& p,
+                                     const SfnSf& sfn,
+                                     uint8_t symStart,
+                                     uint16_t rnti)
+{
+    auto peersIt = m_dlClusterPeersByTb.find(tbMapKey);
+    if (peersIt == m_dlClusterPeersByTb.end())
+    {
+        return;
+    }
+
+    for (auto cellId : peersIt->second)
+    {
+        auto phyIt = m_dlClusterPeerPhys.find(cellId);
+        if (phyIt == m_dlClusterPeerPhys.end())
+        {
+            continue;
+        }
+        phyIt->second->GetPhySapProvider()->SendMacPdu(p->Copy(), sfn, symStart, rnti);
     }
 }
 

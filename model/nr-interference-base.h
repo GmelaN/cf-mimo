@@ -10,6 +10,7 @@
 #include "ns3/nstime.h"
 #include "ns3/object.h"
 #include "ns3/packet.h"
+#include "ns3/spectrum-signal-parameters.h"
 #include "ns3/spectrum-value.h"
 
 #include <list>
@@ -69,7 +70,7 @@ class NrInterferenceBase : public Object
      *
      * @param rxPsd the power spectral density of the signal being RX
      */
-    virtual void StartRx(Ptr<const SpectrumValue> rxPsd);
+    virtual void StartRx(Ptr<const SpectrumSignalParameters> params);
 
     /**
      * notify that the RX attempt has ended. The receiving PHY must call
@@ -113,6 +114,8 @@ class NrInterferenceBase : public Object
      * @param signalId the signal ID
      */
     virtual void DoSubtractSignal(Ptr<const SpectrumValue> spd, uint32_t signalId);
+    virtual bool AllowOverlappingDesiredSignal(Ptr<const SpectrumSignalParameters> params) const;
+    virtual bool HasPerfectInterClusterSuppression() const;
 
     bool m_receiving{false}; ///< are we receiving?
 
@@ -120,6 +123,7 @@ class NrInterferenceBase : public Object
                                              * the signal whose RX is being
                                              * attempted
                                              */
+    Ptr<const SpectrumSignalParameters> m_rxSignalParams{nullptr}; //!< desired signal metadata
 
     Ptr<SpectrumValue> m_allSignals{
         nullptr}; /**< stores the spectral

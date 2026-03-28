@@ -14,6 +14,7 @@
 #include "nr-phy.h"
 
 #include <functional>
+#include <unordered_set>
 
 namespace ns3
 {
@@ -93,6 +94,13 @@ class NrGnbPhy : public NrPhy
     friend class NrHelper;
 
   public:
+    struct ClusteredDlTxContext
+    {
+        uint16_t logicalCellId{0};
+        uint64_t jointTxGroupId{0};
+        bool perfectInterClusterSuppression{false};
+    };
+
     /**
      * @brief CSI-RS model to be used
      */
@@ -256,6 +264,27 @@ class NrGnbPhy : public NrPhy
      * @param p Received packet
      */
     void PhyDataPacketReceived(const Ptr<Packet>& p);
+
+    /**
+     * @brief Queue a data-only DL allocation injected by a cluster coordinator.
+     *
+     * Unlike regular allocations coming from the local MAC scheduler, this
+     * helper suppresses DCI generation on this PHY and only reuses the data
+     * transmission path for the specified slot/allocation.
+     *
+     * @param sfn The target slot for the clustered transmission
+     * @param dci The DL DCI to mirror on this PHY
+     */
+    void PushBackClusteredDlAllocation(const SfnSf& sfn,
+                                       const std::shared_ptr<DciInfoElementTdma>& dci,
+                                       const ClusteredDlTxContext& context);
+    void RegisterClusteredDlTxContext(const SfnSf& sfn,
+                                      const std::shared_ptr<DciInfoElementTdma>& dci,
+                                      const ClusteredDlTxContext& context);
+
+    void SetClusterDlExecutorOnly(bool enable);
+
+    bool IsClusterDlExecutorOnly() const;
 
     /**
      * @brief Generate a DL CQI report
@@ -792,6 +821,9 @@ class NrGnbPhy : public NrPhy
      * @param allocations scheduler allocation for this slot.
      */
     void PrepareRbgAllocationMap(const std::deque<VarTtiAllocInfo>& allocations);
+
+    bool IsClusteredDlAllocation(const SfnSf& sfn,
+                                 const std::shared_ptr<DciInfoElementTdma>& dci) const;
     /**
      * @brief Handle the FH dropping, i.e., the channel access manager has
      *        indicated that the channel is not available.
@@ -817,6 +849,16 @@ class NrGnbPhy : public NrPhy
     //!< configured but not used
 
     std::set<uint64_t> m_ueAttached;             //!< Set of attached UE (by IMSI)
+    std::unordered_set<uint64_t>
+        m_clusteredDlAllocations; //!< DL data-only mirrored allocations from a cluster coordinator
+    std::unordered_map<uint64_t, ClusteredDlTxContext>
+        m_clusteredDlTxContexts; //!< pending clustered DL transmission context
+    std::unordered_set<uint64_t>
+        m_activeClusteredDlExecutions; //!< mirrored DL allocations that are currently transmitting
+    std::unordered_map<uint64_t, ClusteredDlTxContext>
+        m_activeClusteredDlTxContexts; //!< active clustered DL transmission context
+    bool m_clusterDlExecutorOnly{false}; //!< whether this PHY is currently used only as a clustered
+                                         //!< DL executor
     std::set<uint16_t> m_ueAttachedRnti;         //!< Set of attached UE (by RNTI)
     std::vector<Ptr<NrUeNetDevice>> m_deviceMap; //!< Vector of UE devices
 

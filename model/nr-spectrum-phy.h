@@ -347,7 +347,10 @@ class NrSpectrumPhy : public SpectrumPhy
     void StartTxDataFrames(const Ptr<PacketBurst>& pb,
                            const std::list<Ptr<NrControlMessage>>& ctrlMsgList,
                            const std::shared_ptr<DciInfoElementTdma> dci,
-                           const Time& duration);
+                           const Time& duration,
+                           uint16_t logicalCellId = 0,
+                           uint64_t jointTxGroupId = 0,
+                           bool perfectInterClusterSuppression = false);
 
     /**
      * @brief Return true if the current Phy State is TX
@@ -581,6 +584,10 @@ class NrSpectrumPhy : public SpectrumPhy
      * @return true if this class is inside an gnb
      */
     bool IsGnb() const;
+
+    void SetClusterDlExecutorOnly(bool enable);
+
+    bool IsClusterDlExecutorOnly() const;
 
   protected:
     /**
@@ -837,7 +844,9 @@ class NrSpectrumPhy : public SpectrumPhy
     Time m_firstRxStart{
         Seconds(0)}; //!< this is needed to save the time at which we lock down onto signal
     Time m_firstRxDuration{Seconds(0)}; //!< the duration of the current reception
+    Time m_rxEndTime{Seconds(0)};       //!< latest end time among currently merged RX bursts
     State m_state{IDLE};                //!< spectrum phy state
+    bool m_clusterDlExecutorOnly{false}; //!< whether this PHY is used only as a clustered DL executor
     SpectrumValue m_sinrPerceived; //!< SINR that is being update at the end of the DATA reception
                                    //!< and is used for TB decoding
 

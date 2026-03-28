@@ -893,6 +893,7 @@ NrHelper::InstallSingleGnbDevice(
         // PHY <--> MAC SAP
         it.second->GetPhy()->SetPhySapUser(it.second->GetMac()->GetPhySapUser());
         it.second->GetMac()->SetPhySapProvider(it.second->GetPhy()->GetPhySapProvider());
+        it.second->GetMac()->SetDlClusterSelfPhy(it.second->GetPhy());
         // PHY <--> MAC SAP END
 
         // Scheduler SAP
@@ -1167,6 +1168,7 @@ NrHelper::AttachToGnb(const Ptr<NetDevice>& ueDevice, const Ptr<NetDevice>& gnbD
 
         Ptr<NrEpcUeNas> ueNas = ueNetDev->GetNas();
         ueNas->Connect(gnbNetDev->GetCellId(), gnbNetDev->GetBwpArfcn(i));
+
         if (IsMimoFeedbackEnabled())
         {
             // Initialize parameters for MIMO precoding matrix search (PMI feedback)

@@ -8,6 +8,8 @@ set(base_examples
     cttc-3gpp-channel-simple-fdm
     cttc-3gpp-channel-nums
     cttc-3gpp-channel-nums-fdm
+    cttc-nr-dl-cluster-load-compare
+    cttc-nr-dl-cluster-mobility
     cttc-nr-cc-bwp-demo
     cttc-lte-ca-demo
     cttc-nr-demo

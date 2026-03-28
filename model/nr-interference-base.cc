@@ -7,6 +7,7 @@
 #include "nr-interference-base.h"
 
 #include "nr-chunk-processor.h"
+#include "nr-spectrum-signal-parameters.h"
 
 #include "ns3/log.h"
 #include "ns3/simulator.h"
@@ -50,13 +51,15 @@ NrInterferenceBase::GetTypeId()
 }
 
 void
-NrInterferenceBase::StartRx(Ptr<const SpectrumValue> rxPsd)
+NrInterferenceBase::StartRx(Ptr<const SpectrumSignalParameters> params)
 {
+    Ptr<const SpectrumValue> rxPsd = params->psd;
     NS_LOG_FUNCTION(this << *rxPsd);
     if (!m_receiving)
     {
         NS_LOG_LOGIC("first signal");
         m_rxSignal = rxPsd->Copy();
+        m_rxSignalParams = params;
         m_lastChangeTime = Now();
         m_receiving = true;
         for (auto it = m_rsPowerChunkProcessorList.begin(); it != m_rsPowerChunkProcessorList.end();
@@ -79,8 +82,11 @@ NrInterferenceBase::StartRx(Ptr<const SpectrumValue> rxPsd)
         NS_LOG_LOGIC("additional signal" << *m_rxSignal);
         // receiving multiple simultaneous signals, make sure they are synchronized
         NS_ASSERT(m_lastChangeTime == Now());
-        // make sure they use orthogonal resource blocks
-        NS_ASSERT(Sum((*rxPsd) * (*m_rxSignal)) == 0.0);
+        if (!AllowOverlappingDesiredSignal(params))
+        {
+            // make sure they use orthogonal resource blocks
+            NS_ASSERT(Sum((*rxPsd) * (*m_rxSignal)) == 0.0);
+        }
         (*m_rxSignal) += (*rxPsd);
     }
 }
@@ -97,6 +103,7 @@ NrInterferenceBase::EndRx()
     {
         ConditionallyEvaluateChunk();
         m_receiving = false;
+        m_rxSignalParams = nullptr;
         for (auto it = m_rsPowerChunkProcessorList.begin(); it != m_rsPowerChunkProcessorList.end();
              ++it)
         {
@@ -170,7 +177,9 @@ NrInterferenceBase::ConditionallyEvaluateChunk()
         NS_LOG_LOGIC(this << " signal = " << *m_rxSignal << " allSignals = " << *m_allSignals
                           << " noise = " << *m_noise);
 
-        SpectrumValue interf = (*m_allSignals) - (*m_rxSignal) + (*m_noise);
+        SpectrumValue interf = HasPerfectInterClusterSuppression()
+                                   ? SpectrumValue(*m_noise)
+                                   : ((*m_allSignals) - (*m_rxSignal) + (*m_noise));
 
         SpectrumValue sinr = (*m_rxSignal) / interf;
         Time duration = Now() - m_lastChangeTime;
@@ -230,6 +239,32 @@ NrInterferenceBase::AddInterferenceChunkProcessor(Ptr<NrChunkProcessor> p)
 {
     NS_LOG_FUNCTION(this << p);
     m_interfChunkProcessorList.push_back(p);
+}
+
+bool
+NrInterferenceBase::AllowOverlappingDesiredSignal(Ptr<const SpectrumSignalParameters> params) const
+{
+    auto currentData = DynamicCast<const NrSpectrumSignalParametersDataFrame>(m_rxSignalParams);
+    auto newData = DynamicCast<const NrSpectrumSignalParametersDataFrame>(params);
+    if (currentData == nullptr || newData == nullptr)
+    {
+        return false;
+    }
+
+    if (currentData->perfectInterClusterSuppression || newData->perfectInterClusterSuppression)
+    {
+        return true;
+    }
+
+    return currentData->jointTxGroupId != 0 &&
+           currentData->jointTxGroupId == newData->jointTxGroupId;
+}
+
+bool
+NrInterferenceBase::HasPerfectInterClusterSuppression() const
+{
+    auto currentData = DynamicCast<const NrSpectrumSignalParametersDataFrame>(m_rxSignalParams);
+    return currentData != nullptr && currentData->perfectInterClusterSuppression;
 }
 
 } // namespace ns3

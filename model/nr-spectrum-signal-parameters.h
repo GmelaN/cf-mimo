@@ -43,6 +43,8 @@ struct NrSpectrumSignalParametersDataFrame : public SpectrumSignalParameters
     std::list<Ptr<NrControlMessage>> ctrlMsgList; //!< List of control messages
     uint16_t cellId;                              //!< CellId
     uint16_t rnti{0};                             //!< RNTI of the transmitting or receiving UE
+    uint64_t jointTxGroupId{0};                   //!< Joint transmission group identifier
+    bool perfectInterClusterSuppression{false};   //!< Ignore inter-cluster interference
 };
 
 /**

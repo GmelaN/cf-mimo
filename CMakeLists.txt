@@ -100,6 +100,9 @@ set(source_files
     model/nr-control-messages.cc
     model/nr-csi-rs-filter.cc
     model/nr-device-registry.cc
+    model/nr-dl-cluster-coordinator.cc
+    model/nr-dl-cluster-context-manager.cc
+    model/nr-dl-cluster-selection-mechanism.cc
     model/nr-eesm-cc-t1.cc
     model/nr-eesm-cc-t2.cc
     model/nr-eesm-cc.cc
@@ -293,6 +296,9 @@ set(header_files
     model/nr-control-messages.h
     model/nr-csi-rs-filter.h
     model/nr-device-registry.h
+    model/nr-dl-cluster-coordinator.h
+    model/nr-dl-cluster-context-manager.h
+    model/nr-dl-cluster-selection-mechanism.h
     model/nr-eesm-cc-t1.h
     model/nr-eesm-cc-t2.h
     model/nr-eesm-cc.h
@@ -484,6 +490,7 @@ set(test_sources
     test/nr-system-test-schedulers-random.cc
     test/nr-test-asn1-encoding.cc
     test/nr-test-deactivate-bearer.cc
+    test/nr-test-dl-cluster-coordinator.cc
     test/nr-test-entities.cc
     test/nr-test-epc-e2e-data.cc
     test/nr-test-qos-rule-classifier.cc

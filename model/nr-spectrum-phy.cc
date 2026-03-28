@@ -216,6 +216,18 @@ NrSpectrumPhy::GetState() const
     return m_state;
 }
 
+void
+NrSpectrumPhy::SetClusterDlExecutorOnly(bool enable)
+{
+    m_clusterDlExecutorOnly = enable;
+}
+
+bool
+NrSpectrumPhy::IsClusterDlExecutorOnly() const
+{
+    return m_clusterDlExecutorOnly;
+}
+
 Ptr<UniformRandomVariable>
 NrSpectrumPhy::GetErrorModelRv() const
 {
@@ -690,7 +702,10 @@ NrSpectrumPhy::StartRx(Ptr<SpectrumSignalParameters> params)
             // Receive only signals intended for this receiver. Receive only
             //  - if the receiver is a UE and the signal's RNTI matches the UE's RNTI,
             //  - or if the receiver device is either a gNB or not configured (has no RNTI)
-            auto isIntendedRx = (nrDataRxParams->rnti == m_rnti) || !m_hasRnti;
+            auto txNrPhy = DynamicCast<NrSpectrumPhy>(nrDataRxParams->txPhy);
+            const bool isDlFromGnb = txNrPhy != nullptr && txNrPhy->IsGnb();
+            auto isIntendedRx = !m_isGnb ? ((nrDataRxParams->rnti == m_rnti) || !m_hasRnti)
+                                         : !isDlFromGnb;
 
             if (isIntendedRx)
             {
@@ -816,7 +831,10 @@ void
 NrSpectrumPhy::StartTxDataFrames(const Ptr<PacketBurst>& pb,
                                  const std::list<Ptr<NrControlMessage>>& ctrlMsgList,
                                  const std::shared_ptr<DciInfoElementTdma> dci,
-                                 const Time& duration)
+                                 const Time& duration,
+                                 uint16_t logicalCellId,
+                                 uint64_t jointTxGroupId,
+                                 bool perfectInterClusterSuppression)
 {
     NS_LOG_FUNCTION(this);
     switch (m_state)
@@ -851,9 +869,11 @@ NrSpectrumPhy::StartTxDataFrames(const Ptr<PacketBurst>& pb,
         txParams->txPhy = this->GetObject<SpectrumPhy>();
         txParams->psd = m_txPsd;
         txParams->packetBurst = pb;
-        txParams->cellId = GetCellId();
+        txParams->cellId = logicalCellId != 0 ? logicalCellId : GetCellId();
         txParams->ctrlMsgList = ctrlMsgList;
         txParams->rnti = dci->m_rnti;
+        txParams->jointTxGroupId = jointTxGroupId;
+        txParams->perfectInterClusterSuppression = perfectInterClusterSuppression;
         txParams->precodingMatrix = dci->m_precMats;
 
         /* This section is used for trace */
@@ -1272,6 +1292,7 @@ NrSpectrumPhy::StartRxData(const Ptr<NrSpectrumSignalParametersDataFrame>& param
             // first transmission, i.e., we're IDLE and we start RX
             m_firstRxStart = Simulator::Now();
             m_firstRxDuration = params->duration;
+            m_rxEndTime = Simulator::Now() + params->duration;
             NS_LOG_LOGIC(this << " scheduling EndRx with delay " << params->duration.GetSeconds()
                               << "s");
 
@@ -1284,8 +1305,25 @@ NrSpectrumPhy::StartRxData(const Ptr<NrSpectrumSignalParametersDataFrame>& param
             // should occur at the same time and have the same
             // duration, otherwise the interference calculation
             // won't be correct
-            NS_ASSERT((m_firstRxStart == Simulator::Now()) &&
-                      (m_firstRxDuration == params->duration));
+            const bool canMergeDifferentBursts =
+                params->perfectInterClusterSuppression || m_clusterDlExecutorOnly;
+            if (!canMergeDifferentBursts)
+            {
+                NS_ASSERT((m_firstRxStart == Simulator::Now()) &&
+                          (m_firstRxDuration == params->duration));
+            }
+            else
+            {
+                const auto rxEndTime = Simulator::Now() + params->duration;
+                if (rxEndTime > m_rxEndTime)
+                {
+                    m_rxEndTime = rxEndTime;
+                    m_firstRxDuration = m_rxEndTime - m_firstRxStart;
+                    Simulator::Schedule(m_rxEndTime - Simulator::Now(),
+                                        &NrSpectrumPhy::EndRxData,
+                                        this);
+                }
+            }
         }
 
         ChangeState(RX_DATA, params->duration);
@@ -1362,6 +1400,11 @@ NrSpectrumPhy::StartRxUlCtrl(const Ptr<NrSpectrumSignalParametersUlCtrlFrame>& p
     // UL CTRL signals 3) gNB can receive simultaneously signals from various UEs
     NS_LOG_FUNCTION(this);
     NS_ASSERT(params->cellId == GetCellId() && m_isGnb);
+    if (m_clusterDlExecutorOnly)
+    {
+        NS_LOG_DEBUG("Ignoring UL CTRL on clustered DL executor PHY");
+        return;
+    }
     // RDF: method currently supports Uplink control only!
     switch (m_state)
     {
@@ -1417,6 +1460,11 @@ void
 NrSpectrumPhy::StartRxSrs(const Ptr<NrSpectrumSignalParametersUlCtrlFrame>& params)
 {
     NS_LOG_FUNCTION(this);
+    if (m_clusterDlExecutorOnly)
+    {
+        NS_LOG_DEBUG("Ignoring SRS on clustered DL executor PHY");
+        return;
+    }
     // The current code of this function assumes:
     // 1) that this function is called only when cellId = m_cellId
     // 2) this function should be only called for gNB, only gNB should enter into reception of
@@ -1824,6 +1872,11 @@ void
 NrSpectrumPhy::EndRxData()
 {
     NS_LOG_FUNCTION(this);
+    if (Simulator::Now() < m_rxEndTime)
+    {
+        NS_LOG_LOGIC("Ignoring early EndRxData callback; waiting until " << m_rxEndTime);
+        return;
+    }
     m_interferenceData->EndRx();
 
     NS_ASSERT(m_state == RX_DATA);
@@ -1854,6 +1907,7 @@ NrSpectrumPhy::EndRxData()
     m_rxPacketBurstList.clear();
     m_transportBlocks.clear();
     m_rxControlMessageList.clear();
+    m_rxEndTime = Seconds(0);
 }
 
 void
